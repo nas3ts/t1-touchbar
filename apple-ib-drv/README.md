@@ -37,6 +37,16 @@ The five fixes (full write-up in the project's kernel-7 guide):
    renders the row itself.
 5. NULL-guard the sparse `sub_hdevs[]` (crash on USB autosuspend).
 
+### T1 idle timeout
+
+Upstream's `idle_timeout`/`dim_timeout` assume a separate display-control interface. The
+T1 exposes no separate display-control interface to this driver, so `appletb_set_tb_disp()`
+is a no-op there and the timeout did nothing. On T1 the driver now implements the idle
+timeout with the firmware's whole-bar `MODE_OFF` command instead: after `idle_timeout`
+seconds (default 300) with no internal keyboard/trackpad/touch-bar input the bar goes
+dark, and the next internal input restores the mode. Dimming is not available on the T1.
+The timeout is set in `/etc/modprobe.d/apple-touchbar.conf`.
+
 ## How it's installed
 
 The repo-root **`install.sh` (Basic)** does it for you, via **DKMS** so it auto-rebuilds on kernel

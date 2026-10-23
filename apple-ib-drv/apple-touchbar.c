@@ -85,7 +85,10 @@ MODULE_PARM_DESC(idle_timeout, "Default touch bar idle timeout:\n"
 			       "         the display will be turned back on as soon as new input is received\n"
 			       "     0 - turn touch bar display off (input does not turn it on again)\n"
 			       "    -1 - turn touch bar display on (does not turn off automatically)\n"
-			       "    -2 - disable touch bar completely");
+			       "    -2 - disable touch bar completely\n"
+			       "On T1 (2016/2017) the whole bar is turned off instead of just the display;\n"
+			       "only the internal keyboard and trackpad turn it back on (touches on an\n"
+			       "off bar are not reported).");
 
 static int appletb_tb_def_dim_timeout = -2;
 module_param_named(dim_timeout, appletb_tb_def_dim_timeout, int, 0444);
@@ -94,7 +97,8 @@ MODULE_PARM_DESC(dim_timeout, "Default touch bar dim timeout:\n"
 			      "         the display will be returned to full brightness as soon as new input is received\n"
 			      "     0 - dim touch bar display (input does not return it to full brightness)\n"
 			      "    -1 - disable timeout (touch bar never dimmed)\n"
-			      "    [-2] - calculate timeout based on idle-timeout");
+			      "    [-2] - calculate timeout based on idle-timeout\n"
+			      "On T1 (2016/2017) dimming is not supported and this is ignored.");
 
 static int appletb_tb_def_fn_mode = APPLETB_FN_MODE_NORM;
 module_param_named(fnmode, appletb_tb_def_fn_mode, int, 0444);
@@ -175,6 +179,8 @@ struct appletb_device {
 	int			fn_mode;
 
 	bool			is_t1;
+	/* T1 only: the bar is currently powered off by the idle timeout */
+	bool			t1_bar_off;
 };
 
 struct appletb_key_translation {
@@ -344,6 +350,8 @@ static void appletb_schedule_tb_update(struct appletb_device *tb_dev, s64 secs)
 	schedule_delayed_work(&tb_dev->tb_work, msecs_to_jiffies(secs * 1000));
 }
 
+static void appletb_update_touchbar(struct appletb_device *tb_dev, bool force);
+
 static void appletb_set_tb_worker(struct work_struct *work)
 {
 	struct appletb_device *tb_dev =
@@ -403,7 +411,15 @@ static void appletb_set_tb_worker(struct work_struct *work)
 	tb_dev->restore_autopm = false;
 
 	/* calculate time left to next timeout */
-	if (tb_dev->idle_timeout == -2 || tb_dev->idle_timeout == 0)
+	/*
+	 * T1 has no display-control interface and therefore no dim/off-only
+	 * display state; the idle timeout turns the whole bar off instead
+	 * (see below).
+	 */
+	if (tb_dev->is_t1)
+		min_timeout = tb_dev->idle_timeout > 0 ?
+					tb_dev->idle_timeout : -1;
+	else if (tb_dev->idle_timeout == -2 || tb_dev->idle_timeout == 0)
 		min_timeout = -1;
 	else if (tb_dev->idle_timeout == -1)
 		min_timeout = tb_dev->dim_timeout;
@@ -454,6 +470,19 @@ static void appletb_set_tb_worker(struct work_struct *work)
 	} else if (any_tb_key_pressed) {
 		/* keys are still pressed - re-schedule */
 		appletb_schedule_tb_update(tb_dev, min_timeout);
+	} else if (tb_dev->is_t1) {
+		/*
+		 * appletb_set_tb_disp() is a no-op on T1, so a display
+		 * timeout cannot work. Turn the whole bar off with a mode
+		 * change instead; the next internal input clears the flag
+		 * and restores the normal mode.
+		 */
+		if (!tb_dev->t1_bar_off) {
+			spin_lock_irqsave(&tb_dev->tb_lock, flags);
+			tb_dev->t1_bar_off = true;
+			spin_unlock_irqrestore(&tb_dev->tb_lock, flags);
+			appletb_update_touchbar(tb_dev, false);
+		}
 	} else {
 		/* dim or idle timeout reached */
 		int next_disp = (time_to_off == 0) ? APPLETB_CMD_DISP_OFF :
@@ -543,7 +572,9 @@ static void appletb_update_touchbar_no_lock(struct appletb_device *tb_dev,
 		want_mode = APPLETB_CMD_MODE_OFF;
 		want_disp = APPLETB_CMD_DISP_OFF;
 	} else {
-		want_mode = appletb_get_fn_tb_mode(tb_dev);
+		want_mode = (tb_dev->is_t1 && tb_dev->t1_bar_off) ?
+					APPLETB_CMD_MODE_OFF :
+					appletb_get_fn_tb_mode(tb_dev);
 		want_disp = tb_dev->idle_timeout ==  0 ? APPLETB_CMD_DISP_OFF :
 			    tb_dev->dim_timeout  ==  0 ? APPLETB_CMD_DISP_DIM :
 							 APPLETB_CMD_DISP_ON;
@@ -625,6 +656,19 @@ static ssize_t idle_timeout_store(struct device *dev,
 		return -EINVAL;
 
 	appletb_set_idle_timeout(tb_dev, new);
+	if (tb_dev->is_t1) {
+		unsigned long flags;
+
+		/*
+		 * Writing 0 turns the bar off and keeps it off; any other
+		 * value (re)enables it, starting the new timeout from now.
+		 * Use the lock because the worker may be running concurrently.
+		 */
+		spin_lock_irqsave(&tb_dev->tb_lock, flags);
+		tb_dev->t1_bar_off = (new == 0);
+		tb_dev->last_event_time = ktime_get();
+		spin_unlock_irqrestore(&tb_dev->tb_lock, flags);
+	}
 	appletb_update_touchbar(tb_dev, true);
 
 	return size;
@@ -757,6 +801,10 @@ static int appletb_hid_event(struct hid_device *hdev, struct hid_field *field,
 
 	tb_dev->last_event_time = ktime_get();
 
+	/* any touch-bar input wakes a bar the idle timeout turned off */
+	if (tb_dev->is_t1 && tb_dev->t1_bar_off && tb_dev->idle_timeout > 0)
+		tb_dev->t1_bar_off = false;
+
 	appletb_update_touchbar_no_lock(tb_dev, false);
 
 	/*
@@ -821,6 +869,10 @@ static void appletb_inp_event(struct input_handle *handle, unsigned int type,
 		tb_dev->last_fn_pressed = value;
 
 	tb_dev->last_event_time = ktime_get();
+
+	/* internal keyboard/trackpad input wakes a bar the idle timeout turned off */
+	if (tb_dev->is_t1 && tb_dev->t1_bar_off && tb_dev->idle_timeout > 0)
+		tb_dev->t1_bar_off = false;
 
 	appletb_update_touchbar_no_lock(tb_dev, false);
 
@@ -1232,6 +1284,9 @@ static int appletb_probe(struct hid_device *hdev,
 			tb_dev->fn_mode = APPLETB_FN_MODE_NORM;
 		appletb_set_idle_timeout(tb_dev, appletb_tb_def_idle_timeout);
 		appletb_set_dim_timeout(tb_dev, appletb_tb_def_dim_timeout);
+		/* idle_timeout=0 means "bar off, input does not wake it" on T1 */
+		if (tb_dev->is_t1 && tb_dev->idle_timeout == 0)
+			tb_dev->t1_bar_off = true;
 		tb_dev->last_event_time = ktime_get();
 
 		tb_dev->pnd_tb_mode = APPLETB_CMD_MODE_UPD;
@@ -1413,6 +1468,7 @@ static int appletb_reset_resume(struct hid_device *hdev)
 		 */
 		tb_dev->active = true;
 		tb_dev->restore_autopm = true;
+		tb_dev->t1_bar_off = false;
 		tb_dev->last_event_time = ktime_get();
 
 		appletb_update_touchbar_no_lock(tb_dev, true);

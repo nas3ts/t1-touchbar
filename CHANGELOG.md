@@ -3,6 +3,20 @@
 All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **T1 idle timeout.** On the T1 the driver's existing `idle_timeout` (default 300 s) was
+  a no-op because the chip has no display-control interface (`appletb_set_tb_disp()` is
+  stubbed on T1). The timeout now turns the whole bar off with the firmware's `MODE_OFF`
+  command and restores it on the next internal keyboard/trackpad/touch-bar input. Dimming
+  is not available on T1. The installer pins `idle_timeout=300` in
+  `/etc/modprobe.d/apple-touchbar.conf`; edit it to change the timeout.
+- **Optional keyboard-backlight timeout.** `tools/kbd-backlight-timeout/` installs a small
+  root systemd service that turns the `applespi` keyboard backlight off after 30 s of
+  inactivity and restores the last brightness on the next input. Independent of the Touch
+  Bar driver; install with `sudo ./tools/kbd-backlight-timeout/install.sh`.
+
 ## [0.3.0] — 2026-07-01
 
 This repo is now the **standalone T1 firmware Touch Bar driver** — lean, focused, "just make it

@@ -1,0 +1,4 @@
+# Seconds of no keyboard/touchpad/touch-bar input before the MacBook keyboard
+# backlight is turned off.  The next input restores the saved brightness.
+# 0 disables the timeout.
+KBD_BACKLIGHT_TIMEOUT=30

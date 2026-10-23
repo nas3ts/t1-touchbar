@@ -1,0 +1,15 @@
+[Unit]
+Description=MacBook keyboard backlight idle timeout
+After=systemd-backlight@leds:spi::kbd_backlight.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/kbd-backlight-timeout
+ExecStart=/usr/local/bin/kbd-backlight-timeout
+Restart=on-failure
+RestartSec=2
+KillSignal=SIGTERM
+TimeoutStopSec=5
+
+[Install]
+WantedBy=multi-user.target

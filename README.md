@@ -85,6 +85,47 @@ confirm at the MOK screen), or the module won't load.
 **Recovery.** If a boot ever hangs, at GRUB press `e` and add
 `modprobe.blacklist=apple_ibridge,apple_touchbar` to the kernel line.
 
+## Dimming & timeout
+
+The bar turns itself off after **5 minutes** with no input and comes back on the next
+keypress or trackpad touch — no daemon. The T1 has no dimming: the driver turns the whole
+bar off, and while it is off, touches on the bar itself are not reported (the internal
+keyboard and trackpad wake it).
+
+To change the timeout, edit `/etc/modprobe.d/apple-touchbar.conf`:
+
+```conf
+options apple_touchbar idle_timeout=60
+```
+
+`idle_timeout` is seconds (`>0`), `-1` never turn off, `0` off and stay off, `-2` disable
+the bar completely. Reboot to apply. Only the internal keyboard/trackpad and the bar
+reset the timer; an external keyboard or mouse does not.
+
+To try a value without rebooting (the HID device suffix changes per boot):
+
+```bash
+TB=$(for d in /sys/bus/hid/devices/*/; do [ -e "$d/idle_timeout" ] && { echo "$d"; break; }; done)
+echo 30 | sudo tee "$TB/idle_timeout"    # off after 30 s; -1 = never
+```
+
+## Keyboard backlight timeout
+
+The keyboard backlight is a separate `applespi` LED (`spi::kbd_backlight`), and neither the
+driver nor KDE turns it off when you stop typing. The companion service in
+[`tools/kbd-backlight-timeout/`](tools/kbd-backlight-timeout/) does: after **30 seconds**
+without input it turns the backlight off, and the next key/trackpad touch restores the
+last brightness.
+
+```bash
+sudo ./tools/kbd-backlight-timeout/install.sh            # 30 s
+sudo ./tools/kbd-backlight-timeout/install.sh --timeout 60
+sudo ./tools/kbd-backlight-timeout/install.sh --uninstall
+```
+
+It is independent of the Touch Bar driver and needs no reboot. See the
+[tool's README](tools/kbd-backlight-timeout/README.md) for details and caveats.
+
 ## Want to design your own bar?
 
 Custom pixels — your own buttons, colours, and app-aware behaviours drawn by the host — are a
