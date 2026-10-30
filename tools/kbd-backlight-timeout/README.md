@@ -9,7 +9,7 @@ The T1 MacBook's keyboard backlight is exposed by `applespi` as:
 The driver (and PowerDevil/UPower) can set its brightness, but nothing turns it off
 after inactivity. This is a small root systemd service that does:
 
-- after **30 seconds** with no keyboard/touchpad/touch-bar input, writes `0`;
+- after **15 seconds** with no keyboard/touchpad/touch-bar input, writes `0`;
 - on the next input event (key, pointer, touch pad, or lid-open), restores the last
   non-zero brightness;
 - preserves brightness changes made with the Touch Bar keys — it reads the current
@@ -23,7 +23,7 @@ LED and works even if the Touch Bar is disabled.
 ## Install
 
 ```bash
-sudo ./install.sh                 # 30 s
+sudo ./install.sh                 # 15 s
 sudo ./install.sh --timeout=60    # different timeout
 sudo ./install.sh --uninstall
 ./install.sh --check              # detect the LED and input devices, no root

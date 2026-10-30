@@ -6,16 +6,48 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- **T1 idle timeout.** On the T1 the driver's existing `idle_timeout` (default 300 s) was
-  a no-op because the chip has no display-control interface (`appletb_set_tb_disp()` is
-  stubbed on T1). The timeout now turns the whole bar off with the firmware's `MODE_OFF`
-  command and restores it on the next internal keyboard/trackpad/touch-bar input. Dimming
-  is not available on T1. The installer pins `idle_timeout=300` in
-  `/etc/modprobe.d/apple-touchbar.conf`; edit it to change the timeout.
+- **T1 idle timeout.** On the T1 the driver's existing `idle_timeout` was a no-op because the
+  chip has no display-control interface (`appletb_set_tb_disp()` is stubbed on T1). The timeout
+  now turns the whole bar off with the firmware's `MODE_OFF` command and restores it on the next
+  internal keyboard/trackpad/touch-bar input. Dimming is not available on T1.
 - **Optional keyboard-backlight timeout.** `tools/kbd-backlight-timeout/` installs a small
-  root systemd service that turns the `applespi` keyboard backlight off after 30 s of
-  inactivity and restores the last brightness on the next input. Independent of the Touch
+  root systemd service that turns the `applespi` keyboard backlight off after inactivity and
+  restores the last brightness on the next input. Independent of the Touch
   Bar driver; install with `sudo ./tools/kbd-backlight-timeout/install.sh`.
+
+### Changed
+- **Default timeouts are now 15 s.** Both the Touch Bar (`idle_timeout`, driver default and
+  packaged value) and the keyboard backlight (`KBD_BACKLIGHT_TIMEOUT`) go dark after 15 s.
+- **The idle timeout got its own modprobe file** — `/etc/modprobe.d/apple-touchbar-idle.conf`.
+  The installers used to overwrite `apple-touchbar.conf` wholesale, which silently reverted a
+  timeout the user had edited back to the shipped value on every reinstall. The freeze-guard
+  file is still always rewritten (it has to stay correct), an existing `apple-touchbar-idle.conf`
+  is left alone, and a timeout found in the old location is migrated into the drop-in.
+
+### Fixed
+- **Re-installs now rebuild the module when the sources changed.** Both installers skipped
+  `dkms build`/`install` whenever the module was already registered, so driver fixes never
+  reached the running kernel. A stamp of the staged sources decides whether to rebuild.
+- **The driver resumes after sleep.** `appletb_suspend()` (T1) drops `active` and cancels the
+  idle worker, but there was no `.resume` — after a wake the driver stayed inactive forever:
+  no mode changes, no idle timeout, bar left lit. `appletb_reset_resume()` also required
+  `disp_iface`, which a T1 never has, so it silently did nothing. Both now share a T1-aware
+  resume path.
+- **Mode-set success was mis-detected.** `appletb_set_tb_mode()` returned the byte count that
+  `usb_control_msg()`/`hid_hw_raw_request()` report on success (1 or 2) while the worker only
+  treats `0` as success — so `cur_tb_mode` was never recorded and `pnd_tb_mode` never cleared.
+  It now normalises success to `0`, and the T1 idle path retries a rejected `MODE_OFF` instead
+  of leaving the bar lit for good.
+- **One runtime-PM reference leaked per sleep** (kept the T1 powered up for good). Suspend sets
+  `cur_tb_disp = OFF` without dropping the `PM_HINT_FULLON` reference, and the worker's
+  `restore_autopm` block then took a second one on resume. That block also dereferenced
+  `disp_field`, which is NULL on T1. Removed `restore_autopm` entirely: `tb_autopm_off` is now
+  the single truth about the reference — the one held across suspend is re-used, not doubled —
+  and `appletb_remove()` clears it after releasing.
+- **Runtime resume no longer masquerades as a system resume.** `hid`'s `.resume` also runs on
+  every runtime resume, which `appletb_suspend()` never sees; `appletb_resume()` now only acts
+  on interfaces the suspend path actually marked, so a runtime wakeup can't force the bar back
+  on or restart the idle timer.
 
 ## [0.3.0] — 2026-07-01
 

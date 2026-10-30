@@ -41,7 +41,8 @@ if [ "$(id -u)" -ne 0 ]; then exec sudo bash "$0" "$@"; fi
 say "Removing the firmware Touch Bar driver (apple-ib-drv) + its config…"
 run dkms remove -m "$DKMS_NAME" -v "$DKMS_VER" --all 2>/dev/null || true
 run rm -rf "/usr/src/${DKMS_NAME}-${DKMS_VER}"
-run rm -f /etc/modprobe.d/apple-touchbar.conf /etc/modules-load.d/apple-touchbar.conf
+run rm -f /etc/modprobe.d/apple-touchbar.conf /etc/modprobe.d/apple-touchbar-idle.conf \
+         /etc/modules-load.d/apple-touchbar.conf
 run rm -f /etc/udev/rules.d/99-ibridge.rules
 run modprobe -r apple_touchbar apple_ibridge 2>/dev/null || true
 run udevadm control --reload || true

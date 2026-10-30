@@ -2,7 +2,7 @@
 #
 # Install the keyboard-backlight idle timeout (applespi LED).
 #
-#   sudo ./install.sh                 # 30 s (default config)
+#   sudo ./install.sh                 # 15 s (default config)
 #   sudo ./install.sh --timeout 60    # change it
 #   sudo ./install.sh --uninstall
 #   ./install.sh --check              # show LED + input devices, no root needed
@@ -95,7 +95,7 @@ run systemctl restart "$SERVICE"
 
 if [ "$DRY" = 0 ]; then
   echo
-  say "Active. Current setting: $(grep -E '^KBD_BACKLIGHT_TIMEOUT=' "$DEFAULT" 2>/dev/null || echo 'KBD_BACKLIGHT_TIMEOUT=30')"
+  say "Active. Current setting: $(grep -E '^KBD_BACKLIGHT_TIMEOUT=' "$DEFAULT" 2>/dev/null || echo 'KBD_BACKLIGHT_TIMEOUT=15')"
   echo "   Change it:  sudoedit $DEFAULT   (then: sudo systemctl restart $SERVICE)"
   echo "   Remove it:  sudo $SRC/install.sh --uninstall"
 fi

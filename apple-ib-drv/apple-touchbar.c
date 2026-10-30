@@ -76,9 +76,12 @@
 
 #define APPLETB_MAX_DIM_TIME	30
 
+/* T1: seconds before retrying a failed whole-bar off/on mode command */
+#define APPLETB_T1_MODE_RETRY	10
+
 #define APPLETB_FEATURE_IS_T1	BIT(0)
 
-static int appletb_tb_def_idle_timeout = 5 * 60;
+static int appletb_tb_def_idle_timeout = 15;
 module_param_named(idle_timeout, appletb_tb_def_idle_timeout, int, 0444);
 MODULE_PARM_DESC(idle_timeout, "Default touch bar idle timeout:\n"
 			       "    [>0] - turn touch bar display off after no keyboard, trackpad, or touch bar input has been received for this many seconds;\n"
@@ -167,8 +170,14 @@ struct appletb_device {
 	unsigned char		pnd_tb_mode;
 	unsigned char		cur_tb_disp;
 	unsigned char		pnd_tb_disp;
+	/*
+	 * Whether we hold a PM_HINT_FULLON reference on the display interface.
+	 * suspend sets cur_tb_disp = OFF without dropping that reference, so
+	 * this flag — not cur_tb_disp — is the only truth about it: taking a
+	 * second reference on resume leaked one per sleep and kept the T1
+	 * powered up for good.
+	 */
 	bool			tb_autopm_off;
-	bool			restore_autopm;
 	struct delayed_work	tb_work;
 	/* protects most of the above */
 	spinlock_t		tb_lock;
@@ -284,7 +293,14 @@ static int appletb_set_tb_mode(struct appletb_device *tb_dev,
 
 	kfree(buf);
 
-	return rc;
+	/*
+	 * Both send paths return the number of bytes transferred on success
+	 * (usb_control_msg on T1, hid_hw_raw_request elsewhere) rather than 0,
+	 * while callers only distinguish "0 = applied" from "< 0 = failed".
+	 * Normalise the success case so the worker actually records the mode
+	 * and clears the pending one.
+	 */
+	return rc < 0 ? rc : 0;
 }
 
 static int appletb_set_tb_disp(struct appletb_device *tb_dev,
@@ -360,7 +376,6 @@ static void appletb_set_tb_worker(struct work_struct *work)
 	unsigned char pending_mode;
 	unsigned char pending_disp;
 	unsigned char current_disp;
-	bool restore_autopm;
 	bool any_tb_key_pressed, need_reschedule;
 	int rc1 = 1, rc2 = 1;
 	unsigned long flags;
@@ -370,7 +385,6 @@ static void appletb_set_tb_worker(struct work_struct *work)
 	/* handle explicit mode-change request */
 	pending_mode = tb_dev->pnd_tb_mode;
 	pending_disp = tb_dev->pnd_tb_disp;
-	restore_autopm = tb_dev->restore_autopm;
 
 	spin_unlock_irqrestore(&tb_dev->tb_lock, flags);
 
@@ -382,8 +396,12 @@ static void appletb_set_tb_worker(struct work_struct *work)
 	if (pending_disp != APPLETB_CMD_DISP_NONE)
 		rc2 = appletb_set_tb_disp(tb_dev, pending_disp);
 
-	if (restore_autopm && tb_dev->tb_autopm_off)
-		appletb_disable_autopm(tb_dev->disp_field->report->device);
+	/*
+	 * Deliberately no autopm work here. Re-acquiring after a resume (as
+	 * this did) took a second reference while suspend still holds the
+	 * first one — and it dereferenced disp_field, which is NULL on T1.
+	 * The reference held before suspend survives it untouched.
+	 */
 
 	spin_lock_irqsave(&tb_dev->tb_lock, flags);
 
@@ -407,8 +425,6 @@ static void appletb_set_tb_worker(struct work_struct *work)
 			need_reschedule = true;
 	}
 	current_disp = tb_dev->cur_tb_disp;
-
-	tb_dev->restore_autopm = false;
 
 	/* calculate time left to next timeout */
 	/*
@@ -482,6 +498,16 @@ static void appletb_set_tb_worker(struct work_struct *work)
 			tb_dev->t1_bar_off = true;
 			spin_unlock_irqrestore(&tb_dev->tb_lock, flags);
 			appletb_update_touchbar(tb_dev, false);
+		} else if (rc1 < 0) {
+			/*
+			 * The off command failed (the firmware can reject it
+			 * even after our retries) and is still pending: re-arm
+			 * instead of leaving the bar lit for good.
+			 */
+			dev_dbg(tb_dev->log_dev,
+				"bar-off command failed (%d), retrying in %d s\n",
+				rc1, APPLETB_T1_MODE_RETRY);
+			appletb_schedule_tb_update(tb_dev, APPLETB_T1_MODE_RETRY);
 		}
 	} else {
 		/* dim or idle timeout reached */
@@ -1354,8 +1380,10 @@ static void appletb_remove(struct hid_device *hdev)
 		appletb_set_tb_mode(tb_dev, APPLETB_CMD_MODE_OFF);
 		appletb_set_tb_disp(tb_dev, APPLETB_CMD_DISP_ON);
 
-		if (tb_dev->tb_autopm_off)
+		if (tb_dev->tb_autopm_off) {
 			hid_hw_power(tb_dev->disp_iface.hdev, PM_HINT_NORMAL);
+			tb_dev->tb_autopm_off = false;
+		}
 
 		dev_info(tb_dev->log_dev, "Touchbar deactivated\n");
 	}
@@ -1448,9 +1476,14 @@ static int appletb_suspend(struct hid_device *hdev, pm_message_t message)
 	return 0;
 }
 
-static int appletb_reset_resume(struct hid_device *hdev)
+/*
+ * Common resume path. Note that a T1 has no display-control interface, so the
+ * condition below must not require one: insisting on disp_iface (as this code
+ * originally did) meant the driver never re-activated on T1, leaving it inactive
+ * until reboot — no mode changes, no idle timeout, bar left lit by the firmware.
+ */
+static int appletb_do_resume(struct appletb_device *tb_dev, struct hid_device *hdev)
 {
-	struct appletb_device *tb_dev = hid_get_drvdata(hdev);
 	struct appletb_iface_info *iface_info;
 	unsigned long flags;
 
@@ -1461,14 +1494,15 @@ static int appletb_reset_resume(struct hid_device *hdev)
 		iface_info->suspended = false;
 
 	if ((tb_dev->mode_iface.hdev && !tb_dev->mode_iface.suspended) &&
-	    (tb_dev->disp_iface.hdev && !tb_dev->disp_iface.suspended)) {
+	    (tb_dev->is_t1 ||
+	     (tb_dev->disp_iface.hdev && !tb_dev->disp_iface.suspended))) {
 		/*
-		 * Restore touch bar state. Note that autopm state is not
-		 * preserved, so need explicitly restore that here.
+		 * Restore touch bar state. The autopm reference held before
+		 * suspend is still ours — no need to take another one here.
 		 */
 		tb_dev->active = true;
-		tb_dev->restore_autopm = true;
-		tb_dev->t1_bar_off = false;
+		/* keep a deliberately-disabled bar (idle_timeout=0) disabled */
+		tb_dev->t1_bar_off = (tb_dev->idle_timeout == 0);
 		tb_dev->last_event_time = ktime_get();
 
 		appletb_update_touchbar_no_lock(tb_dev, true);
@@ -1479,6 +1513,43 @@ static int appletb_reset_resume(struct hid_device *hdev)
 	spin_unlock_irqrestore(&tb_dev->tb_lock, flags);
 
 	return 0;
+}
+
+static int appletb_resume(struct hid_device *hdev)
+{
+	struct appletb_device *tb_dev = hid_get_drvdata(hdev);
+	struct appletb_iface_info *iface_info;
+	unsigned long flags;
+	bool suspended;
+
+	/* T2 never suspends in here (see appletb_suspend), so nothing to restore */
+	if (!tb_dev->is_t1) {
+		dev_dbg(tb_dev->log_dev, "T2 Mac detected, not handling resume.\n");
+		return 0;
+	}
+
+	spin_lock_irqsave(&tb_dev->tb_lock, flags);
+	iface_info = appletb_get_iface_info(tb_dev, hdev);
+	suspended = iface_info && iface_info->suspended;
+	spin_unlock_irqrestore(&tb_dev->tb_lock, flags);
+
+	/*
+	 * hid's .resume also runs on every runtime resume, which
+	 * appletb_suspend() never sees — only interfaces we marked suspended
+	 * are ours to restore, otherwise a mere runtime wakeup would force the
+	 * bar back on and restart the idle timer.
+	 */
+	if (!suspended)
+		return 0;
+
+	return appletb_do_resume(tb_dev, hdev);
+}
+
+static int appletb_reset_resume(struct hid_device *hdev)
+{
+	struct appletb_device *tb_dev = hid_get_drvdata(hdev);
+
+	return appletb_do_resume(tb_dev, hdev);
 }
 #endif
 
@@ -1527,6 +1598,7 @@ static struct hid_driver appletb_hid_driver = {
 	.input_configured = appletb_input_configured,
 #ifdef CONFIG_PM
 	.suspend = appletb_suspend,
+	.resume = appletb_resume,
 	.reset_resume = appletb_reset_resume,
 #endif
 };

@@ -43,9 +43,18 @@ Upstream's `idle_timeout`/`dim_timeout` assume a separate display-control interf
 T1 exposes no separate display-control interface to this driver, so `appletb_set_tb_disp()`
 is a no-op there and the timeout did nothing. On T1 the driver now implements the idle
 timeout with the firmware's whole-bar `MODE_OFF` command instead: after `idle_timeout`
-seconds (default 300) with no internal keyboard/trackpad/touch-bar input the bar goes
+seconds (default 15) with no internal keyboard/trackpad/touch-bar input the bar goes
 dark, and the next internal input restores the mode. Dimming is not available on the T1.
-The timeout is set in `/etc/modprobe.d/apple-touchbar.conf`.
+The timeout lives in its own drop-in, `/etc/modprobe.d/apple-touchbar-idle.conf`, so
+reinstalling the freeze-guard `apple-touchbar.conf` cannot revert a value you changed.
+If the firmware rejects the off command the worker retries instead of giving up.
+
+### Suspend / resume
+
+`appletb_suspend()` (T1) drops `active` and cancels the worker. `appletb_resume()` puts
+them back — without it the driver stayed inactive after a wake: no mode changes, no idle
+timeout, and the firmware left the bar lit until the next boot. The old condition also
+required `disp_iface`, which a T1 never has, so `reset_resume()` did nothing either.
 
 ## How it's installed
 
@@ -55,13 +64,17 @@ upgrades:
 ```
 dkms add/build/install (this source as apple-ib-drv/0.1)
 /etc/modprobe.d/apple-touchbar.conf      -> options apple_ibridge skip_acpi_power=1   ⭐ required
+/etc/modprobe.d/apple-touchbar-idle.conf -> options apple_touchbar idle_timeout=15   (yours to edit)
 /etc/modules-load.d/apple-touchbar.conf  -> apple-ibridge (auto-load at boot)
 /etc/udev/rules.d/99-ibridge.rules       -> force USB config 1 + disable autosuspend
 ```
 
-`packaging/` holds those three files. The driver defaults to skipping the freeze on T1 hardware, so
-the modprobe.conf `skip_acpi_power=1` is belt-and-suspenders; **never pass `skip_acpi_power=0`** —
-that forces `SOCW(1)` and freezes the machine.
+`packaging/` holds those files. The installer rewrites `apple-touchbar.conf` (it carries the
+freeze guard, so it must stay correct) but leaves an existing `apple-touchbar-idle.conf`
+alone, and it rebuilds the DKMS module whenever the driver sources change. The driver
+defaults to skipping the freeze on T1 hardware, so the modprobe.conf `skip_acpi_power=1` is
+belt-and-suspenders; **never pass `skip_acpi_power=0`** — that forces `SOCW(1)` and freezes
+the machine.
 
 ## Recovery
 

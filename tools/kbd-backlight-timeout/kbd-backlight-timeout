@@ -288,7 +288,7 @@ def main():
         return check_mode()
 
     try:
-        timeout = int(os.environ.get("KBD_BACKLIGHT_TIMEOUT", "30"))
+        timeout = int(os.environ.get("KBD_BACKLIGHT_TIMEOUT", "15"))
     except ValueError:
         log("kbd-backlight: KBD_BACKLIGHT_TIMEOUT is not an integer")
         return 1

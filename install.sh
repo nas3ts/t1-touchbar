@@ -126,19 +126,57 @@ say "Building the firmware Touch Bar driver (apple-ib-drv) via DKMS…"
 # SAFETY FIRST: write skip_acpi_power=1 BEFORE the module can ever exist or auto-load.
 # A load without it runs ASOC.SOCW(1) and HARD-FREEZES the machine. (The driver also
 # defaults to skipping on T1 by DMI, so this is belt-and-suspenders.)
+# Grab any idle timeout out of the old layout BEFORE the rewrite below replaces it.
+IDLE_CONF=/etc/modprobe.d/apple-touchbar-idle.conf
+legacy_idle=$(grep -E '^[[:space:]]*options[[:space:]]+apple_touchbar[[:space:]]+idle_timeout=' \
+                /etc/modprobe.d/apple-touchbar.conf 2>/dev/null | tail -1 || true)
 run install -m644 "$REPO/apple-ib-drv/packaging/apple-touchbar.modprobe.conf" /etc/modprobe.d/apple-touchbar.conf
+# The idle timeout lives in a drop-in of its own so that rewriting the freeze-guard
+# file above never reverts a timeout the user chose. An existing value always wins.
+if [ -e "$IDLE_CONF" ]; then
+  say "  keeping your idle timeout: $(grep -E '^options ' "$IDLE_CONF" | tail -1 || true)"
+elif [ -n "$legacy_idle" ]; then
+  # a timeout lived in the file we just rewrote — carry it over instead of losing it
+  say "  moving your idle timeout into $IDLE_CONF: $legacy_idle"
+  if [ "$DRY" = 1 ]; then
+    say "   + write $IDLE_CONF"
+  else
+    { printf '%s\n\n' "# Touch Bar idle timeout (carried over from apple-touchbar.conf by the installer)."
+      printf '%s\n' "$legacy_idle"; } > "$IDLE_CONF"
+  fi
+else
+  run install -m644 "$REPO/apple-ib-drv/packaging/apple-touchbar-idle.conf" "$IDLE_CONF"
+fi
 run apt-get update
 run apt-get install -y build-essential dkms "linux-headers-$(uname -r)" \
   || run apt-get install -y build-essential dkms linux-headers-generic
 SRC="/usr/src/${DKMS_NAME}-${DKMS_VER}"
 run install -d "$SRC"
 run cp "$REPO"/apple-ib-drv/{Makefile,apple-ibridge.c,apple-ibridge.h,apple-touchbar.c,hid-ids.h,dkms.conf} "$SRC"/
-if dkms status "${DKMS_NAME}/${DKMS_VER}" 2>/dev/null | grep -q installed; then
-  say "  ${DKMS_NAME}/${DKMS_VER} already installed."
-else
+# Rebuild whenever the staged sources differ from the ones we last built. Without this
+# a reinstall keeps the old .ko and driver fixes silently never take effect (dkms says
+# "already installed" and skips straight past them).
+DRV_SRCS=("$REPO"/apple-ib-drv/Makefile "$REPO"/apple-ib-drv/apple-ibridge.c
+          "$REPO"/apple-ib-drv/apple-ibridge.h "$REPO"/apple-ib-drv/apple-touchbar.c
+          "$REPO"/apple-ib-drv/hid-ids.h "$REPO"/apple-ib-drv/dkms.conf)
+STAMP="$SRC/.source-stamp"
+new_stamp=$(md5sum "${DRV_SRCS[@]}" | md5sum)
+old_stamp=$(cat "$STAMP" 2>/dev/null || true)
+need_build=0
+dkms status "${DKMS_NAME}/${DKMS_VER}" 2>/dev/null | grep -q installed || need_build=1
+[ "$new_stamp" = "$old_stamp" ] || need_build=1
+if [ "$need_build" = 1 ]; then
+  say "  building ${DKMS_NAME}/${DKMS_VER} (first build, or the driver sources changed)"
   run dkms add -m "$DKMS_NAME" -v "$DKMS_VER" || true
-  run dkms build -m "$DKMS_NAME" -v "$DKMS_VER"
-  run dkms install -m "$DKMS_NAME" -v "$DKMS_VER"
+  run dkms build -m "$DKMS_NAME" -v "$DKMS_VER" --force
+  run dkms install -m "$DKMS_NAME" -v "$DKMS_VER" --force
+  if [ "$DRY" = 1 ]; then
+    say "   + write $STAMP"
+  else
+    printf '%s' "$new_stamp" > "$STAMP"
+  fi
+else
+  say "  ${DKMS_NAME}/${DKMS_VER} already built from the current sources."
 fi
 # Reassure about the scary-but-harmless taint line the build/load emits. If Secure Boot is
 # ON the self-signed module won't load until its MOK is enrolled — point at that instead.

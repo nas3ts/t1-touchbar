@@ -8,7 +8,8 @@ out-of-tree driver. This page explains what it does, how it's authored, and how 
 
 The installer (the firmware Touch Bar driver) only:
 
-- writes `/etc/modprobe.d/apple-touchbar.conf`, `/etc/modules-load.d/apple-touchbar.conf`,
+- writes `/etc/modprobe.d/apple-touchbar.conf`, `/etc/modprobe.d/apple-touchbar-idle.conf`
+  (only when it doesn't exist already), `/etc/modules-load.d/apple-touchbar.conf`,
   `/etc/udev/rules.d/99-ibridge.rules`,
 - installs DKMS sources under `/usr/src/apple-ib-drv-0.1/` and builds the module,
 - reaches the network **only** via `apt` (to pull `build-essential`, `dkms`, `linux-headers`).
